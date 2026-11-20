@@ -2,11 +2,11 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
 using HarmonyLib;
+using ServerSync;
 using UnityEngine;
 using Object = UnityEngine.Object;
 
@@ -17,7 +17,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
 {
     internal const string PluginGuid = "com.summonnpc.valheim";
     internal const string PluginName = "SummonNPC";
-    internal const string PluginVersion = "0.4.0";
+    internal const string PluginVersion = "0.5.0";
     internal static readonly string SummonPrefabName = "SummonNPC_Summon";
     private static readonly string[] ExcludedPrefabPrefixes =
         { "FW", "SP", "Goblin", "Charred", "Dverger", "Jotun", "StoneGolem" };
@@ -33,8 +33,10 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
     internal static ConfigEntry<string> ChestPrefab { get; private set; } = null!;
     internal static ConfigEntry<string> LegsPrefab { get; private set; } = null!;
     internal static ConfigEntry<string> CapePrefab { get; private set; } = null!;
+    internal static ConfigEntry<string> OneHandedWeaponPrefab { get; private set; } = null!;
 
     private static ConfigFile PluginConfig { get; set; } = null!;
+    internal static ConfigSync ServerConfigSync { get; private set; } = null!;
     private static bool _appearanceConfigBound;
     private Harmony? _harmony;
 
@@ -52,25 +54,40 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
                 "Beard selection remains available for either body type.",
                 new AcceptableValueList<string>("Male", "Female")));
 
-        LogSource.LogInfo("Loading SummonNPC.");
-        if (!EnableMod.Value)
+        ServerConfigSync = new ConfigSync(PluginGuid)
         {
-            LogSource.LogInfo("SummonNPC is disabled by configuration; vanilla summon behavior is unchanged.");
-            return;
-        }
+            DisplayName = PluginName,
+            CurrentVersion = PluginVersion,
+            MinimumRequiredVersion = PluginVersion,
+            ModRequired = true,
+            IsLocked = true
+        };
+        AddSynchronizedConfigEntry(EnableMod);
+        AddSynchronizedConfigEntry(NpcNames);
+        AddSynchronizedConfigEntry(BodyType);
 
+        LogSource.LogInfo("Loading SummonNPC.");
         _harmony = new Harmony(PluginGuid);
         _harmony.PatchAll(typeof(SummonNpcPlugin).Assembly);
     }
 
     private IEnumerator Start()
     {
-        while (ObjectDB.instance == null || ObjectDB.instance.m_items.Count == 0)
+        while (!IsObjectDatabaseReady(ObjectDB.instance))
         {
             yield return null;
         }
 
         BindAppearanceConfig(ObjectDB.instance);
+
+        while (ZNet.instance == null ||
+               ZNetScene.instance == null ||
+               !ServerConfigSync.InitialSyncDone)
+        {
+            yield return null;
+        }
+
+        RegisterSummonNpcPatch.TryRegister(ZNetScene.instance);
     }
 
     private void OnDestroy()
@@ -81,10 +98,18 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
     internal static void TryBindAppearanceConfig()
     {
         ObjectDB? objectDatabase = ObjectDB.instance;
-        if (objectDatabase != null && objectDatabase.m_items.Count > 0)
+        if (IsObjectDatabaseReady(objectDatabase))
         {
             BindAppearanceConfig(objectDatabase);
         }
+    }
+
+    private static bool IsObjectDatabaseReady(ObjectDB? objectDatabase)
+    {
+        return objectDatabase != null &&
+               objectDatabase.m_items.Count > 0 &&
+               objectDatabase.m_recipes != null &&
+               objectDatabase.m_recipes.Count > 0;
     }
 
     private static void BindAppearanceConfig(ObjectDB objectDatabase)
@@ -100,6 +125,10 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         string[] chestOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Chest, "ArmorBronzeChest");
         string[] legsOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Legs, "ArmorBronzeLegs");
         string[] capeOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Cape, "CapeTrollHide");
+        string[] oneHandedWeaponOptions = GetPrefabOptions(
+            objectDatabase,
+            PrefabChoice.OneHandedWeapon,
+            "AxeBronze");
 
         HairPrefab = BindPrefabChoice("Hair", "HairNone", "Hair prefab name; use HairNone to remove hair.", hairOptions);
         BeardPrefab = BindPrefabChoice("Beard", "BeardNone", "Beard prefab name; use BeardNone to remove the beard.", beardOptions);
@@ -107,6 +136,8 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
             "Hex hair color, such as #8C6345. Use Default to preserve the game's default hair color.");
         SkinColor = PluginConfig.Bind("Appearance", "Skin Color", "#A6A6A6",
             "Hex skin color, such as #A6A6A6.");
+        AddSynchronizedConfigEntry(HairColor);
+        AddSynchronizedConfigEntry(SkinColor);
         HelmetPrefab = BindPrefabChoice("Helmet Prefab", "HelmetBronze",
             "Helmet prefab name, or None to remove the helmet.", helmetOptions, "Equipment");
         ChestPrefab = BindPrefabChoice("Chest Prefab", "ArmorBronzeChest",
@@ -115,12 +146,25 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
             "Leg armor prefab name, or None to remove leg armor.", legsOptions, "Equipment");
         CapePrefab = BindPrefabChoice("Cape Prefab", "CapeTrollHide",
             "Cape prefab name, or None to remove the cape.", capeOptions, "Equipment");
+        OneHandedWeaponPrefab = BindPrefabChoice(
+            "One-Handed Weapon Prefab",
+            "AxeBronze",
+            "One-handed weapon prefab name to replace the summoned NPC's default one-handed weapons. " +
+            "Choose Default to preserve the game's random loadout; bows are not changed.",
+            oneHandedWeaponOptions,
+            "Equipment");
 
         _appearanceConfigBound = true;
         LogSource.LogInfo(
             $"Loaded appearance choices: hair={hairOptions.Length}, beard={beardOptions.Length}, " +
             $"helmets={helmetOptions.Length - 1}, chest={chestOptions.Length - 1}, " +
-            $"legs={legsOptions.Length - 1}, capes={capeOptions.Length - 1}.");
+            $"legs={legsOptions.Length - 1}, capes={capeOptions.Length - 1}, " +
+            $"one-handed weapons={oneHandedWeaponOptions.Length - 1}.");
+    }
+
+    private static void AddSynchronizedConfigEntry<T>(ConfigEntry<T> configEntry)
+    {
+        ServerConfigSync.AddConfigEntry(configEntry).SynchronizedConfig = true;
     }
 
     private static ConfigEntry<string> BindPrefabChoice(
@@ -130,26 +174,38 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         string[] options,
         string section = "Appearance")
     {
-        return PluginConfig.Bind(
+        ConfigEntry<string> configEntry = PluginConfig.Bind(
             section,
             key,
             defaultValue,
             new ConfigDescription(description, new AcceptableValueList<string>(options)));
+        AddSynchronizedConfigEntry(configEntry);
+        return configEntry;
     }
 
     private static string[] GetPrefabOptions(ObjectDB objectDatabase, PrefabChoice choice, string defaultValue)
     {
         HashSet<string> prefabNames = new(StringComparer.Ordinal);
-        AddPrefabOptions(objectDatabase.m_items, prefabNames, choice);
+        bool isHairOrBeard = choice is PrefabChoice.Hair or PrefabChoice.Beard;
+        bool isOneHandedWeapon = choice == PrefabChoice.OneHandedWeapon;
+        if (isOneHandedWeapon)
+        {
+            AddCraftableWeaponOptions(objectDatabase, prefabNames);
+        }
+        else
+        {
+            AddPrefabOptions(objectDatabase.m_items, prefabNames, choice);
+        }
 
+        ItemDrop? defaultItem = objectDatabase.GetItemPrefab(defaultValue)?.GetComponent<ItemDrop>();
         if (!string.Equals(defaultValue, "None", StringComparison.OrdinalIgnoreCase) &&
-            objectDatabase.GetItemPrefab(defaultValue) != null)
+            defaultItem != null &&
+            (!isOneHandedWeapon || IsPlayerUsableOneHandedWeapon(defaultItem)))
         {
             prefabNames.Add(defaultValue);
         }
 
         List<string> options = new(prefabNames);
-        bool isHairOrBeard = choice is PrefabChoice.Hair or PrefabChoice.Beard;
         if (isHairOrBeard)
         {
             options.Remove(defaultValue);
@@ -165,7 +221,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         }
         else
         {
-            options.Insert(0, "None");
+            options.Insert(0, isOneHandedWeapon ? "Default" : "None");
         }
 
         if (options.Count == 0)
@@ -174,6 +230,32 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         }
 
         return options.ToArray();
+    }
+
+    private static void AddCraftableWeaponOptions(ObjectDB objectDatabase, HashSet<string> prefabNames)
+    {
+        foreach (Recipe? recipe in objectDatabase.m_recipes)
+        {
+            ItemDrop? itemDrop = recipe?.m_item;
+            if (itemDrop == null ||
+                !IsPlayerUsableOneHandedWeapon(itemDrop) ||
+                IsExcludedPrefab(itemDrop.gameObject.name))
+            {
+                continue;
+            }
+
+            prefabNames.Add(itemDrop.gameObject.name);
+        }
+    }
+
+    private static bool IsPlayerUsableOneHandedWeapon(ItemDrop? itemDrop)
+    {
+        ItemDrop.ItemData? itemData = itemDrop?.m_itemData;
+        Attack? attack = itemData?.m_shared?.m_attack;
+        return itemData?.m_shared?.m_itemType == ItemDrop.ItemData.ItemType.OneHandedWeapon &&
+               attack != null &&
+               !string.IsNullOrWhiteSpace(attack.m_attackAnimation) &&
+               attack.m_attackProjectile == null;
     }
 
     private static void AddPrefabOptions(
@@ -227,7 +309,8 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         Helmet,
         Chest,
         Legs,
-        Cape
+        Cape,
+        OneHandedWeapon
     }
 }
 
@@ -238,14 +321,49 @@ internal static class RegisterSummonNpcPatch
     private const string StaffPrefabName = "StaffSkeleton";
     private const string PlayerPrefabName = "Player";
     private static GameObject? _cloneContainer;
+    private static ZNetScene? _registeredScene;
+    private static bool _registrationComplete;
+    private static bool _waitingForServerConfigLogged;
 
     private static void Postfix(ZNetScene __instance)
     {
         SummonNpcPlugin.TryBindAppearanceConfig();
 
-        GameObject? sourceSummon = __instance.GetPrefab(SourceSummonPrefabName);
-        GameObject? playerPrefab = __instance.GetPrefab(PlayerPrefabName);
-        GameObject? staffPrefab = __instance.GetPrefab(StaffPrefabName);
+        if (!SummonNpcPlugin.ServerConfigSync.InitialSyncDone)
+        {
+            if (!_waitingForServerConfigLogged)
+            {
+                SummonNpcPlugin.LogSource.LogInfo(
+                    "Waiting for the server configuration sync before registering the custom summon.");
+                _waitingForServerConfigLogged = true;
+            }
+
+            return;
+        }
+
+        TryRegister(__instance);
+    }
+
+    internal static void TryRegister(ZNetScene scene)
+    {
+        if (ReferenceEquals(_registeredScene, scene) && _registrationComplete)
+        {
+            return;
+        }
+
+        _registrationComplete = false;
+        if (!SummonNpcPlugin.EnableMod.Value)
+        {
+            SummonNpcPlugin.LogSource.LogInfo(
+                "SummonNPC is disabled by the server configuration; vanilla summon behavior is unchanged.");
+            _registeredScene = scene;
+            _registrationComplete = true;
+            return;
+        }
+
+        GameObject? sourceSummon = scene.GetPrefab(SourceSummonPrefabName);
+        GameObject? playerPrefab = scene.GetPrefab(PlayerPrefabName);
+        GameObject? staffPrefab = scene.GetPrefab(StaffPrefabName);
 
         if (sourceSummon == null || playerPrefab == null || staffPrefab == null)
         {
@@ -254,7 +372,7 @@ internal static class RegisterSummonNpcPatch
             return;
         }
 
-        GameObject? clone = __instance.GetPrefab(SummonNpcPlugin.SummonPrefabName);
+        GameObject? clone = scene.GetPrefab(SummonNpcPlugin.SummonPrefabName);
         if (clone == null)
         {
             int bodyModelIndex = string.Equals(
@@ -267,7 +385,7 @@ internal static class RegisterSummonNpcPatch
                 return;
             }
 
-            if (!RegisterPrefab(__instance, clone))
+            if (!RegisterPrefab(scene, clone))
             {
                 Object.Destroy(clone);
                 return;
@@ -310,6 +428,8 @@ internal static class RegisterSummonNpcPatch
         spawnAbility.m_spawnPrefab = spawnPrefabs;
         SummonNpcPlugin.LogSource.LogInfo(
             "Dead Raiser now spawns the configured custom summon with vanilla friendly-skeleton behavior.");
+        _registeredScene = scene;
+        _registrationComplete = true;
     }
 
     private static GameObject? CreateSummonPrefab(
@@ -361,6 +481,7 @@ internal static class RegisterSummonNpcPatch
         Transform container = GetCloneContainer();
         GameObject clone = Object.Instantiate(sourceSummon, container);
         clone.name = SummonNpcPlugin.SummonPrefabName;
+        clone.AddComponent<SummonNpcMarker>();
 
         Character? character = clone.GetComponent<Character>();
         VisEquipment? cloneVisuals = clone.GetComponent<VisEquipment>();
@@ -559,11 +680,15 @@ internal static class RegisterSummonNpcPatch
     }
 }
 
+internal sealed class SummonNpcMarker : MonoBehaviour
+{
+}
+
 internal static class SummonAppearance
 {
+    private const string AssignedNpcNameZdoKey = "SummonNPC_NpcName";
     private static readonly Dictionary<string, int> PrefabHashes = new(StringComparer.Ordinal);
     private static readonly HashSet<string> MissingPrefabWarnings = new(StringComparer.Ordinal);
-    private static readonly ConditionalWeakTable<Tameable, AssignedNpcName> AssignedNames = new();
     private static readonly FieldInfo? HairItemField = AccessTools.Field(typeof(VisEquipment), "m_hairItem");
     private static readonly FieldInfo? BeardItemField = AccessTools.Field(typeof(VisEquipment), "m_beardItem");
     private static readonly FieldInfo? HelmetHideHairField = AccessTools.Field(typeof(VisEquipment), "m_helmetHideHair");
@@ -584,26 +709,54 @@ internal static class SummonAppearance
     private static bool _missingBeardEquippedMethodWarningLogged;
     private static bool _missingHelmetHairSettingsWarningLogged;
 
-    private sealed class AssignedNpcName
-    {
-        internal AssignedNpcName(string value)
-        {
-            Value = value;
-        }
-
-        internal string Value { get; }
-    }
-
     internal static bool IsSummon(GameObject gameObject)
     {
-        return gameObject.name.StartsWith(SummonNpcPlugin.SummonPrefabName, StringComparison.Ordinal);
+        return gameObject.GetComponent<SummonNpcMarker>() != null ||
+               gameObject.name.StartsWith(SummonNpcPlugin.SummonPrefabName, StringComparison.Ordinal);
     }
 
-    internal static string GetAssignedName(Tameable tameable)
+    internal static void InitializeAssignedName(Tameable tameable)
     {
-        string name = AssignedNames.GetValue(
-            tameable,
-            _ => new AssignedNpcName(SelectNpcName())).Value;
+        TryGetAssignedName(tameable);
+    }
+
+    internal static string GetAssignedName(Tameable tameable, string fallback)
+    {
+        return TryGetAssignedName(tameable) ?? fallback;
+    }
+
+    private static string? TryGetAssignedName(Tameable tameable)
+    {
+        ZNetView? networkView = tameable.GetComponent<ZNetView>();
+        if (networkView == null || !networkView.IsValid())
+        {
+            return null;
+        }
+
+        ZDO? zdo = networkView.GetZDO();
+        if (zdo == null)
+        {
+            return null;
+        }
+
+        string name = zdo.GetString(AssignedNpcNameZdoKey, string.Empty);
+        if (string.IsNullOrWhiteSpace(name) && networkView.IsOwner())
+        {
+            name = SelectNpcName();
+            zdo.Set(AssignedNpcNameZdoKey, name);
+        }
+
+        if (!string.IsNullOrWhiteSpace(name) && networkView.IsOwner() &&
+            !string.Equals(zdo.GetString(ZDOVars.s_tamedName, string.Empty), name, StringComparison.Ordinal))
+        {
+            zdo.Set(ZDOVars.s_tamedName, name);
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+
         Character? character = tameable.GetComponent<Character>();
         if (character != null)
         {
@@ -965,6 +1118,100 @@ internal static class ApplySummonBeardPatch
     }
 }
 
+[HarmonyPatch(typeof(Tameable), "Awake")]
+internal static class InitializeSummonNamePatch
+{
+    private static void Postfix(Tameable __instance)
+    {
+        if (SummonAppearance.IsSummon(__instance.gameObject))
+        {
+            SummonAppearance.InitializeAssignedName(__instance);
+        }
+    }
+}
+
+[HarmonyPatch(typeof(ZNetScene), "CreateObject")]
+internal static class InitializeSummonNameAfterNetworkSpawnPatch
+{
+    private static void Postfix(GameObject __result)
+    {
+        if (__result != null && SummonAppearance.IsSummon(__result))
+        {
+            Tameable? tameable = __result.GetComponent<Tameable>();
+            if (tameable != null)
+            {
+                SummonAppearance.InitializeAssignedName(tameable);
+            }
+        }
+    }
+}
+
+[HarmonyPatch(typeof(Humanoid), "GiveDefaultItem")]
+internal static class ReplaceSummonMeleeWeaponPatch
+{
+    private static bool _replacementLogged;
+    private static bool _missingWeaponWarningLogged;
+
+    private static void Prefix(Humanoid __instance, ref GameObject __0)
+    {
+        if (!SummonAppearance.IsSummon(__instance.gameObject) || __0 == null)
+        {
+            return;
+        }
+
+        ItemDrop.ItemData? itemData = __0.GetComponent<ItemDrop>()?.m_itemData;
+        if (itemData?.IsWeapon() == true)
+        {
+            SummonNpcPlugin.LogSource.LogInfo(
+                $"Summon default weapon candidate '{__0.name}' ({itemData.m_shared?.m_itemType.ToString() ?? "unknown"}).");
+        }
+
+        string selectedPrefabName = SummonNpcPlugin.OneHandedWeaponPrefab.Value;
+        if (string.Equals(selectedPrefabName, "Default", StringComparison.OrdinalIgnoreCase) ||
+            !IsOneHandedWeapon(__0))
+        {
+            return;
+        }
+
+        GameObject? replacement = ObjectDB.instance?.GetItemPrefab(selectedPrefabName);
+        if (replacement == null || !IsOneHandedWeapon(replacement))
+        {
+            if (!_missingWeaponWarningLogged)
+            {
+                SummonNpcPlugin.LogSource.LogWarning(
+                    $"Could not find configured one-handed weapon '{selectedPrefabName}'; summoned NPCs will keep their original loadout.");
+                _missingWeaponWarningLogged = true;
+            }
+
+            return;
+        }
+
+        if (__0 == replacement)
+        {
+            return;
+        }
+
+        __0 = replacement;
+        LogReplacement(selectedPrefabName);
+    }
+
+    private static void LogReplacement(string prefabName)
+    {
+        if (!_replacementLogged)
+        {
+            SummonNpcPlugin.LogSource.LogInfo(
+                $"Summoned NPC one-handed weapons are replaced with '{prefabName}'.");
+            _replacementLogged = true;
+        }
+    }
+
+    private static bool IsOneHandedWeapon(GameObject prefab)
+    {
+        ItemDrop? itemDrop = prefab.GetComponent<ItemDrop>();
+        return itemDrop?.m_itemData?.m_shared?.m_itemType == ItemDrop.ItemData.ItemType.OneHandedWeapon;
+    }
+}
+
 [HarmonyPatch(typeof(Tameable), "GetName")]
 internal static class SetSummonTamedNamePatch
 {
@@ -972,7 +1219,7 @@ internal static class SetSummonTamedNamePatch
     {
         if (SummonAppearance.IsSummon(__instance.gameObject))
         {
-            __result = SummonAppearance.GetAssignedName(__instance);
+            __result = SummonAppearance.GetAssignedName(__instance, __result);
         }
     }
 }
@@ -984,7 +1231,7 @@ internal static class SetSummonHoverNamePatch
     {
         if (SummonAppearance.IsSummon(__instance.gameObject))
         {
-            __result = SummonAppearance.GetAssignedName(__instance);
+            __result = SummonAppearance.GetAssignedName(__instance, __result);
         }
     }
 }

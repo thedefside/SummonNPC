@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Target Name="BundleServerSync" AfterTargets="Build">
+    <ItemGroup>
+      <ServerSyncBundleInput Include="$(TargetPath)" />
+      <ServerSyncBundleInput Include="$(TargetDir)ServerSync.dll" />
+    </ItemGroup>
+    <ILRepack
+      Parallel="true"
+      DebugInfo="false"
+      Internalize="true"
+      InputAssemblies="@(ServerSyncBundleInput)"
+      OutputFile="$(TargetPath).merged"
+      TargetKind="SameAsPrimaryAssembly"
+      LibraryPath="$(TargetDir);$(BepInExCoreDir);$(ValheimManagedDir)" />
+    <Move SourceFiles="$(TargetPath).merged" DestinationFiles="$(TargetPath)" />
+    <Delete Files="$(TargetDir)ServerSync.dll" />
+  </Target>
+</Project>

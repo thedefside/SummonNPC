@@ -6,10 +6,14 @@
     <Nullable>enable</Nullable>
     <AssemblyName>SummonNPC</AssemblyName>
     <RootNamespace>SummonNPC</RootNamespace>
-    <Version>0.4.0</Version>
+    <Version>0.5.0</Version>
     <ValheimManagedDir Condition="'$(ValheimManagedDir)' == ''">$(MSBuildProgramFiles32)\Steam\steamapps\common\Valheim\valheim_Data\Managed</ValheimManagedDir>
     <BepInExCoreDir Condition="'$(BepInExCoreDir)' == ''">$(APPDATA)\com.kesomannen.gale\valheim\profiles\Default\BepInEx\core</BepInExCoreDir>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ILRepack.Lib.MSBuild.Task" Version="2.0.48" PrivateAssets="all" />
+  </ItemGroup>
 
   <ItemGroup>
     <Reference Include="assembly_valheim">
@@ -35,6 +39,10 @@
     <Reference Include="0Harmony">
       <HintPath>$(BepInExCoreDir)\0Harmony.dll</HintPath>
       <Private>false</Private>
+    </Reference>
+    <Reference Include="ServerSync">
+      <HintPath>lib\ServerSync.dll</HintPath>
+      <Private>true</Private>
     </Reference>
   </ItemGroup>
 
