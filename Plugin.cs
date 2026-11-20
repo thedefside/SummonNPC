@@ -17,13 +17,14 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
 {
     internal const string PluginGuid = "com.summonnpc.valheim";
     internal const string PluginName = "SummonNPC";
-    internal const string PluginVersion = "0.3.3";
+    internal const string PluginVersion = "0.4.0";
     internal static readonly string SummonPrefabName = "SummonNPC_Summon";
     private static readonly string[] ExcludedPrefabPrefixes =
         { "FW", "SP", "Goblin", "Charred", "Dverger", "Jotun", "StoneGolem" };
     internal static ManualLogSource LogSource { get; private set; } = null!;
     internal static ConfigEntry<bool> EnableMod { get; private set; } = null!;
     internal static ConfigEntry<string> NpcNames { get; private set; } = null!;
+    internal static ConfigEntry<string> BodyType { get; private set; } = null!;
     internal static ConfigEntry<string> HairPrefab { get; private set; } = null!;
     internal static ConfigEntry<string> BeardPrefab { get; private set; } = null!;
     internal static ConfigEntry<string> HairColor { get; private set; } = null!;
@@ -45,6 +46,11 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
             "Set to false to leave the game's summon behavior unchanged. Restart the game after changing this setting.");
         NpcNames = Config.Bind("Summon", "NPC Names", "NPC",
             "Comma-separated names; one name is randomly selected for each summon.");
+        BodyType = Config.Bind("Appearance", "Body Type", "Male",
+            new ConfigDescription(
+                "Player body model used by the summoned NPC. Restart the game after changing this setting. " +
+                "Beard selection remains available for either body type.",
+                new AcceptableValueList<string>("Male", "Female")));
 
         LogSource.LogInfo("Loading SummonNPC.");
         if (!EnableMod.Value)
@@ -102,13 +108,13 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         SkinColor = PluginConfig.Bind("Appearance", "Skin Color", "#A6A6A6",
             "Hex skin color, such as #A6A6A6.");
         HelmetPrefab = BindPrefabChoice("Helmet Prefab", "HelmetBronze",
-            "Helmet prefab name, or None to remove the helmet.", helmetOptions);
+            "Helmet prefab name, or None to remove the helmet.", helmetOptions, "Equipment");
         ChestPrefab = BindPrefabChoice("Chest Prefab", "ArmorBronzeChest",
-            "Chest armor prefab name, or None to remove chest armor.", chestOptions);
+            "Chest armor prefab name, or None to remove chest armor.", chestOptions, "Equipment");
         LegsPrefab = BindPrefabChoice("Legs Prefab", "ArmorBronzeLegs",
-            "Leg armor prefab name, or None to remove leg armor.", legsOptions);
+            "Leg armor prefab name, or None to remove leg armor.", legsOptions, "Equipment");
         CapePrefab = BindPrefabChoice("Cape Prefab", "CapeTrollHide",
-            "Cape prefab name, or None to remove the cape.", capeOptions);
+            "Cape prefab name, or None to remove the cape.", capeOptions, "Equipment");
 
         _appearanceConfigBound = true;
         LogSource.LogInfo(
@@ -121,10 +127,11 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         string key,
         string defaultValue,
         string description,
-        string[] options)
+        string[] options,
+        string section = "Appearance")
     {
         return PluginConfig.Bind(
-            "Appearance",
+            section,
             key,
             defaultValue,
             new ConfigDescription(description, new AcceptableValueList<string>(options)));
@@ -250,7 +257,11 @@ internal static class RegisterSummonNpcPatch
         GameObject? clone = __instance.GetPrefab(SummonNpcPlugin.SummonPrefabName);
         if (clone == null)
         {
-            clone = CreateSummonPrefab(sourceSummon, playerPrefab);
+            int bodyModelIndex = string.Equals(
+                SummonNpcPlugin.BodyType.Value,
+                "Female",
+                StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+            clone = CreateSummonPrefab(sourceSummon, playerPrefab, bodyModelIndex);
             if (clone == null)
             {
                 return;
@@ -301,13 +312,16 @@ internal static class RegisterSummonNpcPatch
             "Dead Raiser now spawns the configured custom summon with vanilla friendly-skeleton behavior.");
     }
 
-    private static GameObject? CreateSummonPrefab(GameObject sourceSummon, GameObject playerPrefab)
+    private static GameObject? CreateSummonPrefab(
+        GameObject sourceSummon,
+        GameObject playerPrefab,
+        int bodyModelIndex)
     {
         VisEquipment? summonVisuals = sourceSummon.GetComponent<VisEquipment>();
         VisEquipment? playerVisuals = playerPrefab.GetComponent<VisEquipment>();
         if (summonVisuals?.m_bodyModel == null || playerVisuals?.m_bodyModel == null ||
-            playerVisuals.m_models == null || playerVisuals.m_models.Length == 0 ||
-            playerVisuals.m_models[0].m_mesh == null ||
+            playerVisuals.m_models == null || playerVisuals.m_models.Length <= bodyModelIndex ||
+            playerVisuals.m_models[bodyModelIndex].m_mesh == null ||
             playerVisuals.m_bodyModel.rootBone == null ||
             summonVisuals.m_bodyModel.rootBone == null ||
             playerVisuals.m_bodyModel.sharedMaterials.Length == 0)
@@ -318,14 +332,21 @@ internal static class RegisterSummonNpcPatch
         }
 
         SkinnedMeshRenderer sourceBody = playerVisuals.m_bodyModel;
-        Mesh playerBodyMesh = sourceBody.sharedMesh != null
-            ? sourceBody.sharedMesh
-            : playerVisuals.m_models[0].m_mesh;
+        VisEquipment.PlayerModel playerModel = playerVisuals.m_models[bodyModelIndex];
+        Mesh playerBodyMesh = playerModel.m_mesh;
+        Material[] playerBodyMaterials = GetBodyMaterials(
+            sourceBody,
+            playerModel,
+            bodyModelIndex,
+            playerBodyMesh.subMeshCount);
         if (sourceBody.bones.Length != playerBodyMesh.bindposes.Length ||
-            sourceBody.sharedMaterials.Length != playerBodyMesh.subMeshCount)
+            playerBodyMaterials.Length != playerBodyMesh.subMeshCount)
         {
             SummonNpcPlugin.LogSource.LogWarning(
-                "The player body mesh, bones, and materials do not match; the Dead Raiser is unchanged.");
+                $"The {SummonNpcPlugin.BodyType.Value} body mesh is incompatible with the player rig " +
+                $"(bones={sourceBody.bones.Length}, bind poses={playerBodyMesh.bindposes.Length}, " +
+                $"materials={playerBodyMaterials.Length}, submeshes={playerBodyMesh.subMeshCount}); " +
+                "the Dead Raiser is unchanged.");
             return null;
         }
 
@@ -386,7 +407,7 @@ internal static class RegisterSummonNpcPatch
         character.m_name = "NPC";
         SkinnedMeshRenderer targetBody = cloneVisuals.m_bodyModel;
         targetBody.sharedMesh = playerBodyMesh;
-        cloneVisuals.m_bodyModel.sharedMaterials = playerVisuals.m_bodyModel.sharedMaterials;
+        targetBody.sharedMaterials = playerBodyMaterials;
         targetBody.rootBone = cloneRootBone;
         targetBody.bones = cloneBones;
         targetBody.localBounds = sourceBody.localBounds;
@@ -421,9 +442,41 @@ internal static class RegisterSummonNpcPatch
         }
 
         SummonNpcPlugin.LogSource.LogInfo(
-            $"Configured summon body mesh '{targetBody.sharedMesh.name}' with {cloneBones.Length} cloned bones and bounds {targetBody.localBounds}.");
+            $"Configured {SummonNpcPlugin.BodyType.Value} summon body mesh '{targetBody.sharedMesh.name}' with {cloneBones.Length} cloned bones and bounds {targetBody.localBounds}.");
 
         return clone;
+    }
+
+    private static Material[] GetBodyMaterials(
+        SkinnedMeshRenderer sourceBody,
+        VisEquipment.PlayerModel playerModel,
+        int bodyModelIndex,
+        int subMeshCount)
+    {
+        Material[] sourceMaterials = sourceBody.sharedMaterials;
+        if (bodyModelIndex == 0 && sourceMaterials.Length == subMeshCount)
+        {
+            return sourceMaterials;
+        }
+
+        Material? baseMaterial = playerModel.m_baseMaterial;
+        if (baseMaterial == null && sourceMaterials.Length > 0)
+        {
+            baseMaterial = sourceMaterials[0];
+        }
+
+        if (baseMaterial == null)
+        {
+            return Array.Empty<Material>();
+        }
+
+        Material[] materials = new Material[subMeshCount];
+        for (int i = 0; i < materials.Length; i++)
+        {
+            materials[i] = baseMaterial;
+        }
+
+        return materials;
     }
 
     private static Transform GetCloneContainer()
