@@ -1,7 +1,7 @@
 {
   "name": "SummonNPC",
   "version_number": "0.3.3",
-  "website_url": "https://thunderstore.io/c/valheim/",
+  "website_url": "https://github.com/thedefside/SummonNPC",
   "description": "Customize Dead Raiser’s friendly summon with a player-styled appearance while retaining vanilla summon behavior.",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2351"
