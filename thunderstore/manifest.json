@@ -1,6 +1,6 @@
 {
   "name": "SummonNPC",
-  "version_number": "0.5.0",
+  "version_number": "0.5.1",
   "website_url": "https://github.com/thedefside/SummonNPC",
   "description": "Customize the Dead Raiser summon with player appearance, synchronized names, server-authoritative config, and one-handed weapon selection.",
   "dependencies": [

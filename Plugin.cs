@@ -17,7 +17,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
 {
     internal const string PluginGuid = "com.summonnpc.valheim";
     internal const string PluginName = "SummonNPC";
-    internal const string PluginVersion = "0.5.0";
+    internal const string PluginVersion = "0.5.1";
     internal static readonly string SummonPrefabName = "SummonNPC_Summon";
     private static readonly string[] ExcludedPrefabPrefixes =
         { "FW", "SP", "Goblin", "Charred", "Dverger", "Jotun", "StoneGolem" };
@@ -128,7 +128,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         string[] oneHandedWeaponOptions = GetPrefabOptions(
             objectDatabase,
             PrefabChoice.OneHandedWeapon,
-            "AxeBronze");
+            "Default");
 
         HairPrefab = BindPrefabChoice("Hair", "HairNone", "Hair prefab name; use HairNone to remove hair.", hairOptions);
         BeardPrefab = BindPrefabChoice("Beard", "BeardNone", "Beard prefab name; use BeardNone to remove the beard.", beardOptions);
@@ -148,7 +148,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
             "Cape prefab name, or None to remove the cape.", capeOptions, "Equipment");
         OneHandedWeaponPrefab = BindPrefabChoice(
             "One-Handed Weapon Prefab",
-            "AxeBronze",
+            "Default",
             "One-handed weapon prefab name to replace the summoned NPC's default one-handed weapons. " +
             "Choose Default to preserve the game's random loadout; bows are not changed.",
             oneHandedWeaponOptions,
@@ -757,12 +757,7 @@ internal static class SummonAppearance
             return null;
         }
 
-        Character? character = tameable.GetComponent<Character>();
-        if (character != null)
-        {
-            character.m_name = name;
-        }
-
+        // Valheim groups summons by Character.m_name when enforcing the staff's summon limit.
         return name;
     }
 
