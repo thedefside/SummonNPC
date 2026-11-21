@@ -1,8 +1,8 @@
 {
   "name": "SummonNPC",
-  "version_number": "0.5.1",
+  "version_number": "0.5.2",
   "website_url": "https://github.com/thedefside/SummonNPC",
-  "description": "Customize the Dead Raiser summon with player appearance, synchronized names, server-authoritative config, and one-handed weapon selection.",
+  "description": "Customize the Dead Raiser summon with player appearance and synchronized names while retaining its vanilla loadout.",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2351"
   ]

@@ -17,7 +17,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
 {
     internal const string PluginGuid = "com.summonnpc.valheim";
     internal const string PluginName = "SummonNPC";
-    internal const string PluginVersion = "0.5.1";
+    internal const string PluginVersion = "0.5.2";
     internal static readonly string SummonPrefabName = "SummonNPC_Summon";
     private static readonly string[] ExcludedPrefabPrefixes =
         { "FW", "SP", "Goblin", "Charred", "Dverger", "Jotun", "StoneGolem" };
@@ -33,8 +33,6 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
     internal static ConfigEntry<string> ChestPrefab { get; private set; } = null!;
     internal static ConfigEntry<string> LegsPrefab { get; private set; } = null!;
     internal static ConfigEntry<string> CapePrefab { get; private set; } = null!;
-    internal static ConfigEntry<string> OneHandedWeaponPrefab { get; private set; } = null!;
-
     private static ConfigFile PluginConfig { get; set; } = null!;
     internal static ConfigSync ServerConfigSync { get; private set; } = null!;
     private static bool _appearanceConfigBound;
@@ -107,9 +105,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
     private static bool IsObjectDatabaseReady(ObjectDB? objectDatabase)
     {
         return objectDatabase != null &&
-               objectDatabase.m_items.Count > 0 &&
-               objectDatabase.m_recipes != null &&
-               objectDatabase.m_recipes.Count > 0;
+               objectDatabase.m_items.Count > 0;
     }
 
     private static void BindAppearanceConfig(ObjectDB objectDatabase)
@@ -125,10 +121,6 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         string[] chestOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Chest, "ArmorBronzeChest");
         string[] legsOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Legs, "ArmorBronzeLegs");
         string[] capeOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Cape, "CapeTrollHide");
-        string[] oneHandedWeaponOptions = GetPrefabOptions(
-            objectDatabase,
-            PrefabChoice.OneHandedWeapon,
-            "Default");
 
         HairPrefab = BindPrefabChoice("Hair", "HairNone", "Hair prefab name; use HairNone to remove hair.", hairOptions);
         BeardPrefab = BindPrefabChoice("Beard", "BeardNone", "Beard prefab name; use BeardNone to remove the beard.", beardOptions);
@@ -146,20 +138,12 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
             "Leg armor prefab name, or None to remove leg armor.", legsOptions, "Equipment");
         CapePrefab = BindPrefabChoice("Cape Prefab", "CapeTrollHide",
             "Cape prefab name, or None to remove the cape.", capeOptions, "Equipment");
-        OneHandedWeaponPrefab = BindPrefabChoice(
-            "One-Handed Weapon Prefab",
-            "Default",
-            "One-handed weapon prefab name to replace the summoned NPC's default one-handed weapons. " +
-            "Choose Default to preserve the game's random loadout; bows are not changed.",
-            oneHandedWeaponOptions,
-            "Equipment");
 
         _appearanceConfigBound = true;
         LogSource.LogInfo(
             $"Loaded appearance choices: hair={hairOptions.Length}, beard={beardOptions.Length}, " +
             $"helmets={helmetOptions.Length - 1}, chest={chestOptions.Length - 1}, " +
-            $"legs={legsOptions.Length - 1}, capes={capeOptions.Length - 1}, " +
-            $"one-handed weapons={oneHandedWeaponOptions.Length - 1}.");
+            $"legs={legsOptions.Length - 1}, capes={capeOptions.Length - 1}.");
     }
 
     private static void AddSynchronizedConfigEntry<T>(ConfigEntry<T> configEntry)
@@ -187,20 +171,11 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
     {
         HashSet<string> prefabNames = new(StringComparer.Ordinal);
         bool isHairOrBeard = choice is PrefabChoice.Hair or PrefabChoice.Beard;
-        bool isOneHandedWeapon = choice == PrefabChoice.OneHandedWeapon;
-        if (isOneHandedWeapon)
-        {
-            AddCraftableWeaponOptions(objectDatabase, prefabNames);
-        }
-        else
-        {
-            AddPrefabOptions(objectDatabase.m_items, prefabNames, choice);
-        }
+        AddPrefabOptions(objectDatabase.m_items, prefabNames, choice);
 
         ItemDrop? defaultItem = objectDatabase.GetItemPrefab(defaultValue)?.GetComponent<ItemDrop>();
         if (!string.Equals(defaultValue, "None", StringComparison.OrdinalIgnoreCase) &&
-            defaultItem != null &&
-            (!isOneHandedWeapon || IsPlayerUsableOneHandedWeapon(defaultItem)))
+            defaultItem != null)
         {
             prefabNames.Add(defaultValue);
         }
@@ -221,7 +196,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         }
         else
         {
-            options.Insert(0, isOneHandedWeapon ? "Default" : "None");
+            options.Insert(0, "None");
         }
 
         if (options.Count == 0)
@@ -230,32 +205,6 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         }
 
         return options.ToArray();
-    }
-
-    private static void AddCraftableWeaponOptions(ObjectDB objectDatabase, HashSet<string> prefabNames)
-    {
-        foreach (Recipe? recipe in objectDatabase.m_recipes)
-        {
-            ItemDrop? itemDrop = recipe?.m_item;
-            if (itemDrop == null ||
-                !IsPlayerUsableOneHandedWeapon(itemDrop) ||
-                IsExcludedPrefab(itemDrop.gameObject.name))
-            {
-                continue;
-            }
-
-            prefabNames.Add(itemDrop.gameObject.name);
-        }
-    }
-
-    private static bool IsPlayerUsableOneHandedWeapon(ItemDrop? itemDrop)
-    {
-        ItemDrop.ItemData? itemData = itemDrop?.m_itemData;
-        Attack? attack = itemData?.m_shared?.m_attack;
-        return itemData?.m_shared?.m_itemType == ItemDrop.ItemData.ItemType.OneHandedWeapon &&
-               attack != null &&
-               !string.IsNullOrWhiteSpace(attack.m_attackAnimation) &&
-               attack.m_attackProjectile == null;
     }
 
     private static void AddPrefabOptions(
@@ -309,8 +258,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         Helmet,
         Chest,
         Legs,
-        Cape,
-        OneHandedWeapon
+        Cape
     }
 }
 
@@ -1138,72 +1086,6 @@ internal static class InitializeSummonNameAfterNetworkSpawnPatch
                 SummonAppearance.InitializeAssignedName(tameable);
             }
         }
-    }
-}
-
-[HarmonyPatch(typeof(Humanoid), "GiveDefaultItem")]
-internal static class ReplaceSummonMeleeWeaponPatch
-{
-    private static bool _replacementLogged;
-    private static bool _missingWeaponWarningLogged;
-
-    private static void Prefix(Humanoid __instance, ref GameObject __0)
-    {
-        if (!SummonAppearance.IsSummon(__instance.gameObject) || __0 == null)
-        {
-            return;
-        }
-
-        ItemDrop.ItemData? itemData = __0.GetComponent<ItemDrop>()?.m_itemData;
-        if (itemData?.IsWeapon() == true)
-        {
-            SummonNpcPlugin.LogSource.LogInfo(
-                $"Summon default weapon candidate '{__0.name}' ({itemData.m_shared?.m_itemType.ToString() ?? "unknown"}).");
-        }
-
-        string selectedPrefabName = SummonNpcPlugin.OneHandedWeaponPrefab.Value;
-        if (string.Equals(selectedPrefabName, "Default", StringComparison.OrdinalIgnoreCase) ||
-            !IsOneHandedWeapon(__0))
-        {
-            return;
-        }
-
-        GameObject? replacement = ObjectDB.instance?.GetItemPrefab(selectedPrefabName);
-        if (replacement == null || !IsOneHandedWeapon(replacement))
-        {
-            if (!_missingWeaponWarningLogged)
-            {
-                SummonNpcPlugin.LogSource.LogWarning(
-                    $"Could not find configured one-handed weapon '{selectedPrefabName}'; summoned NPCs will keep their original loadout.");
-                _missingWeaponWarningLogged = true;
-            }
-
-            return;
-        }
-
-        if (__0 == replacement)
-        {
-            return;
-        }
-
-        __0 = replacement;
-        LogReplacement(selectedPrefabName);
-    }
-
-    private static void LogReplacement(string prefabName)
-    {
-        if (!_replacementLogged)
-        {
-            SummonNpcPlugin.LogSource.LogInfo(
-                $"Summoned NPC one-handed weapons are replaced with '{prefabName}'.");
-            _replacementLogged = true;
-        }
-    }
-
-    private static bool IsOneHandedWeapon(GameObject prefab)
-    {
-        ItemDrop? itemDrop = prefab.GetComponent<ItemDrop>();
-        return itemDrop?.m_itemData?.m_shared?.m_itemType == ItemDrop.ItemData.ItemType.OneHandedWeapon;
     }
 }
 
