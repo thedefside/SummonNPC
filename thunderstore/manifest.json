@@ -1,8 +1,8 @@
 {
   "name": "SummonNPC",
-  "version_number": "0.5.2",
+  "version_number": "0.7.0",
   "website_url": "https://github.com/thedefside/SummonNPC",
-  "description": "Customize the Dead Raiser summon with player appearance and synchronized names while retaining its vanilla loadout.",
+  "description": "Customize the Dead Raiser summon's body, equipment appearance, and synchronized names.",
   "dependencies": [
     "denikson-BepInExPack_Valheim-5.4.2351"
   ]

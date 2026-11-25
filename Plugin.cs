@@ -17,12 +17,14 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
 {
     internal const string PluginGuid = "com.summonnpc.valheim";
     internal const string PluginName = "SummonNPC";
-    internal const string PluginVersion = "0.5.2";
+    internal const string PluginVersion = "0.7.0";
     internal static readonly string SummonPrefabName = "SummonNPC_Summon";
     private static readonly string[] ExcludedPrefabPrefixes =
         { "FW", "SP", "Goblin", "Charred", "Dverger", "Jotun", "StoneGolem" };
+    private static readonly string[] SummonShieldPrefabs = { "ShieldWood", "ShieldBronzeBuckler" };
     internal static ManualLogSource LogSource { get; private set; } = null!;
     internal static ConfigEntry<bool> EnableMod { get; private set; } = null!;
+    internal static ConfigEntry<bool> DebugLogging { get; private set; } = null!;
     internal static ConfigEntry<string> NpcNames { get; private set; } = null!;
     internal static ConfigEntry<string> BodyType { get; private set; } = null!;
     internal static ConfigEntry<string> HairPrefab { get; private set; } = null!;
@@ -33,10 +35,16 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
     internal static ConfigEntry<string> ChestPrefab { get; private set; } = null!;
     internal static ConfigEntry<string> LegsPrefab { get; private set; } = null!;
     internal static ConfigEntry<string> CapePrefab { get; private set; } = null!;
+    internal static ConfigEntry<string> MeleeWeapon { get; private set; } = null!;
+    internal static ConfigEntry<string> BowPrefab { get; private set; } = null!;
+    internal static readonly Dictionary<string, ConfigEntry<string>> ShieldAppearances = new(StringComparer.Ordinal);
+
     private static ConfigFile PluginConfig { get; set; } = null!;
     internal static ConfigSync ServerConfigSync { get; private set; } = null!;
     private static bool _appearanceConfigBound;
     private Harmony? _harmony;
+    internal static bool UsesSkeletonBody =>
+        string.Equals(BodyType.Value, "Skeleton", StringComparison.OrdinalIgnoreCase);
 
     private void Awake()
     {
@@ -44,14 +52,15 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         PluginConfig = Config;
         EnableMod = Config.Bind("General", "Enable Mod", true,
             "Set to false to leave the game's summon behavior unchanged. Restart the game after changing this setting.");
+        DebugLogging = Config.Bind("General", "Debug Logging", false,
+            "Enable extra local troubleshooting messages. Restart to capture startup details.");
         NpcNames = Config.Bind("Summon", "NPC Names", "NPC",
             "Comma-separated names; one name is randomly selected for each summon.");
         BodyType = Config.Bind("Appearance", "Body Type", "Male",
             new ConfigDescription(
-                "Player body model used by the summoned NPC. Restart the game after changing this setting. " +
-                "Beard selection remains available for either body type.",
-                new AcceptableValueList<string>("Male", "Female")));
-
+                "Body model used by the summoned NPC: Male, Female, or the vanilla skeleton. " +
+                "Restart the game after changing this setting. Hair and beard appearance settings apply to player bodies.",
+                new AcceptableValueList<string>("Male", "Female", "Skeleton")));
         ServerConfigSync = new ConfigSync(PluginGuid)
         {
             DisplayName = PluginName,
@@ -121,6 +130,10 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         string[] chestOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Chest, "ArmorBronzeChest");
         string[] legsOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Legs, "ArmorBronzeLegs");
         string[] capeOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Cape, "CapeTrollHide");
+        string[] meleeWeaponOptions = GetMeleeWeaponOptions(objectDatabase);
+        string[] bowOptions = GetBowOptions(objectDatabase);
+        string[] shieldOptions = GetPrefabOptions(objectDatabase, PrefabChoice.Shield, "None");
+        shieldOptions[0] = "Default";
 
         HairPrefab = BindPrefabChoice("Hair", "HairNone", "Hair prefab name; use HairNone to remove hair.", hairOptions);
         BeardPrefab = BindPrefabChoice("Beard", "BeardNone", "Beard prefab name; use BeardNone to remove the beard.", beardOptions);
@@ -138,12 +151,55 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
             "Leg armor prefab name, or None to remove leg armor.", legsOptions, "Equipment");
         CapePrefab = BindPrefabChoice("Cape Prefab", "CapeTrollHide",
             "Cape prefab name, or None to remove the cape.", capeOptions, "Equipment");
+        MeleeWeapon = BindPrefabChoice("Melee Weapon", "Default",
+            "Weapon appearance. Default keeps the vanilla look; " +
+            "combat and ranged loadouts remain unchanged.", meleeWeaponOptions, "Equipment");
+        BowPrefab = BindPrefabChoice("Bow Prefab", "Default",
+            "Bow appearance for ranged summons. Default keeps the vanilla look; " +
+            "damage, attacks, and summon loadout chances remain unchanged.", bowOptions, "Equipment");
+        BindShieldAppearances(shieldOptions);
 
         _appearanceConfigBound = true;
-        LogSource.LogInfo(
-            $"Loaded appearance choices: hair={hairOptions.Length}, beard={beardOptions.Length}, " +
-            $"helmets={helmetOptions.Length - 1}, chest={chestOptions.Length - 1}, " +
-            $"legs={legsOptions.Length - 1}, capes={capeOptions.Length - 1}.");
+        if (DebugLogging.Value)
+        {
+            LogSource.LogInfo(
+                $"Loaded appearance choices: hair={hairOptions.Length}, beard={beardOptions.Length}, " +
+                $"helmets={helmetOptions.Length - 1}, chest={chestOptions.Length - 1}, " +
+                $"legs={legsOptions.Length - 1}, capes={capeOptions.Length - 1}, " +
+                $"melee weapons={meleeWeaponOptions.Length - 1}, bows={bowOptions.Length - 1}, " +
+                $"shields={shieldOptions.Length - 1}.");
+        }
+    }
+
+    private static void BindShieldAppearances(string[] options)
+    {
+        foreach (string prefabName in SummonShieldPrefabs)
+        {
+            string key = $"{prefabName} Appearance";
+            ConfigEntry<string> legacy = PluginConfig.Bind("Shield Replacements", key, "Default",
+                "Previous location for this shield appearance.");
+            string initialValue = legacy.Value;
+            if (Array.IndexOf(options, initialValue) < 0)
+            {
+                LogSource.LogWarning($"Previous shield appearance '{initialValue}' is unavailable; using Default.");
+                initialValue = "Default";
+            }
+
+            ShieldAppearances.Add(prefabName, BindPrefabChoice(
+                key,
+                initialValue,
+                $"Appearance for summons carrying {prefabName}; Default keeps the original shield. " +
+                "This does not change combat or add shields to summons.",
+                options,
+                "Equipment"));
+            PluginConfig.Remove(legacy.Definition);
+        }
+
+        PluginConfig.Save();
+        if (options.Length == 1)
+        {
+            LogSource.LogWarning("No usable shield appearances were found in the item database.");
+        }
     }
 
     private static void AddSynchronizedConfigEntry<T>(ConfigEntry<T> configEntry)
@@ -207,6 +263,119 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         return options.ToArray();
     }
 
+    private static string[] GetMeleeWeaponOptions(ObjectDB objectDatabase)
+    {
+        HashSet<string> prefabNames = new(StringComparer.Ordinal);
+        foreach (Recipe? recipe in objectDatabase.m_recipes)
+        {
+            ItemDrop? item = recipe?.m_item;
+            if (item == null || IsExcludedPrefab(item.gameObject.name))
+            {
+                continue;
+            }
+
+            GameObject? prefab = objectDatabase.GetItemPrefab(item.gameObject.name);
+            if (prefab != null && IsMeleeWeaponPrefab(prefab))
+            {
+                prefabNames.Add(prefab.name);
+            }
+        }
+
+        GameObject? bronzeAxe = objectDatabase.GetItemPrefab("AxeBronze");
+        if (bronzeAxe != null && IsMeleeWeaponPrefab(bronzeAxe))
+        {
+            prefabNames.Add(bronzeAxe.name);
+        }
+
+        GameObject? tankard = objectDatabase.GetItemPrefab("Tankard_dvergr");
+        if (tankard != null && tankard.GetComponent<ItemDrop>() != null)
+        {
+            prefabNames.Add(tankard.name);
+        }
+        else
+        {
+            LogSource.LogWarning("Tankard_dvergr is unavailable in the item database; its appearance cannot be selected.");
+        }
+
+        List<string> options = new(prefabNames);
+        options.Sort(StringComparer.OrdinalIgnoreCase);
+        options.Insert(0, "Default");
+        if (options.Count == 1)
+        {
+            LogSource.LogWarning("No melee weapon appearances were found in the item database.");
+        }
+
+        return options.ToArray();
+    }
+
+    private static bool IsMeleeWeaponPrefab(GameObject? prefab)
+    {
+        ItemDrop.ItemData.SharedData? data = prefab?.GetComponent<ItemDrop>()?.m_itemData?.m_shared;
+        return IsMeleeWeaponData(data);
+    }
+
+    private static bool IsMeleeWeaponData(ItemDrop.ItemData.SharedData? data)
+    {
+        Attack? attack = data?.m_attack;
+        return data?.m_itemType == ItemDrop.ItemData.ItemType.OneHandedWeapon &&
+               attack != null &&
+               !string.IsNullOrWhiteSpace(attack.m_attackAnimation) &&
+               attack.m_attackProjectile == null;
+    }
+
+    private static string[] GetBowOptions(ObjectDB objectDatabase)
+    {
+        HashSet<string> prefabNames = new(StringComparer.Ordinal);
+        foreach (GameObject? prefab in objectDatabase.m_items)
+        {
+            if (prefab != null && prefab.name.StartsWith("Bow", StringComparison.OrdinalIgnoreCase))
+            {
+                AddBowOption(prefab, prefabNames);
+            }
+        }
+
+        foreach (Recipe? recipe in objectDatabase.m_recipes)
+        {
+            ItemDrop? item = recipe?.m_item;
+            if (item != null)
+            {
+                AddBowOption(objectDatabase.GetItemPrefab(item.gameObject.name), prefabNames);
+            }
+        }
+
+        List<string> options = new(prefabNames);
+        options.Sort(StringComparer.OrdinalIgnoreCase);
+        options.Insert(0, "Default");
+        if (options.Count == 1)
+        {
+            LogSource.LogWarning("No player bow appearances were found in the item database.");
+        }
+
+        return options.ToArray();
+    }
+
+    private static void AddBowOption(GameObject? prefab, HashSet<string> prefabNames)
+    {
+        if (prefab == null || IsExcludedPrefab(prefab.name))
+        {
+            return;
+        }
+
+        ItemDrop.ItemData.SharedData? data = prefab.GetComponent<ItemDrop>()?.m_itemData?.m_shared;
+        if (IsPlayerBowData(data))
+        {
+            prefabNames.Add(prefab.name);
+        }
+    }
+
+    private static bool IsPlayerBowData(ItemDrop.ItemData.SharedData? data)
+    {
+        return data?.m_itemType == ItemDrop.ItemData.ItemType.Bow &&
+               data.m_skillType == Skills.SkillType.Bows &&
+               data.m_attack != null &&
+               !string.IsNullOrWhiteSpace(data.m_attack.m_attackAnimation);
+    }
+
     private static void AddPrefabOptions(
         IEnumerable<GameObject> prefabs,
         HashSet<string> prefabNames,
@@ -215,6 +384,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         foreach (GameObject? prefab in prefabs)
         {
             if (prefab == null || IsExcludedPrefab(prefab.name) ||
+                (choice == PrefabChoice.Shield && IsExcludedShieldPrefab(prefab.name)) ||
                 string.Equals(prefab.name, "None", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
@@ -229,6 +399,7 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
                 PrefabChoice.Chest => itemType == "Chest",
                 PrefabChoice.Legs => itemType == "Legs",
                 PrefabChoice.Cape => itemType == "Shoulder",
+                PrefabChoice.Shield => itemType == "Shield",
                 _ => false
             };
             if (matches)
@@ -236,6 +407,12 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
                 prefabNames.Add(prefab.name);
             }
         }
+    }
+
+    private static bool IsExcludedShieldPrefab(string prefabName)
+    {
+        return string.Equals(prefabName, "Axe1h_JotunWarrior 1", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(prefabName, "Axe1h_JotunWarrior1", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsExcludedPrefab(string prefabName)
@@ -258,7 +435,8 @@ public sealed class SummonNpcPlugin : BaseUnityPlugin
         Helmet,
         Chest,
         Legs,
-        Cape
+        Cape,
+        Shield
     }
 }
 
@@ -386,14 +564,50 @@ internal static class RegisterSummonNpcPatch
         int bodyModelIndex)
     {
         VisEquipment? summonVisuals = sourceSummon.GetComponent<VisEquipment>();
+        if (summonVisuals?.m_bodyModel == null)
+        {
+            SummonNpcPlugin.LogSource.LogWarning(
+                "Could not find the vanilla summon body model; the Dead Raiser is unchanged.");
+            return null;
+        }
+
+        Transform container = GetCloneContainer();
+        GameObject clone = Object.Instantiate(sourceSummon, container);
+        clone.name = SummonNpcPlugin.SummonPrefabName;
+        SummonNpcMarker marker = clone.AddComponent<SummonNpcMarker>();
+
+        Character? character = clone.GetComponent<Character>();
+        VisEquipment? cloneVisuals = clone.GetComponent<VisEquipment>();
+        if (character == null || cloneVisuals?.m_bodyModel == null)
+        {
+            Object.Destroy(clone);
+            SummonNpcPlugin.LogSource.LogWarning(
+                "The friendly skeleton prefab is missing its Character or VisEquipment component; the Dead Raiser is unchanged.");
+            return null;
+        }
+
+        character.m_name = "NPC";
+        if (SummonNpcPlugin.UsesSkeletonBody)
+        {
+            VisEquipment? playerVisualsForMount = playerPrefab.GetComponent<VisEquipment>();
+            marker.PlayerHelmetMount = CreatePlayerHelmetMount(playerVisualsForMount, cloneVisuals);
+            marker.ChestOverlay = SkeletonChestOverlay.Create(playerVisualsForMount, cloneVisuals);
+            if (SummonNpcPlugin.DebugLogging.Value)
+            {
+                SummonNpcPlugin.LogSource.LogInfo(
+                    "Using the vanilla skeleton body and equipment mounts for the summoned NPC.");
+            }
+            return clone;
+        }
+
         VisEquipment? playerVisuals = playerPrefab.GetComponent<VisEquipment>();
-        if (summonVisuals?.m_bodyModel == null || playerVisuals?.m_bodyModel == null ||
+        if (playerVisuals?.m_bodyModel == null ||
             playerVisuals.m_models == null || playerVisuals.m_models.Length <= bodyModelIndex ||
             playerVisuals.m_models[bodyModelIndex].m_mesh == null ||
             playerVisuals.m_bodyModel.rootBone == null ||
-            summonVisuals.m_bodyModel.rootBone == null ||
             playerVisuals.m_bodyModel.sharedMaterials.Length == 0)
         {
+            Object.Destroy(clone);
             SummonNpcPlugin.LogSource.LogWarning(
                 "Could not find the player and summon body models; the Dead Raiser is unchanged.");
             return null;
@@ -410,6 +624,7 @@ internal static class RegisterSummonNpcPatch
         if (sourceBody.bones.Length != playerBodyMesh.bindposes.Length ||
             playerBodyMaterials.Length != playerBodyMesh.subMeshCount)
         {
+            Object.Destroy(clone);
             SummonNpcPlugin.LogSource.LogWarning(
                 $"The {SummonNpcPlugin.BodyType.Value} body mesh is incompatible with the player rig " +
                 $"(bones={sourceBody.bones.Length}, bind poses={playerBodyMesh.bindposes.Length}, " +
@@ -421,23 +636,9 @@ internal static class RegisterSummonNpcPatch
         Transform[] playerBones = sourceBody.bones;
         if (playerBones.Length == 0)
         {
-            SummonNpcPlugin.LogSource.LogWarning(
-                "The player body model has no animation bones; the Dead Raiser is unchanged.");
-            return null;
-        }
-
-        Transform container = GetCloneContainer();
-        GameObject clone = Object.Instantiate(sourceSummon, container);
-        clone.name = SummonNpcPlugin.SummonPrefabName;
-        clone.AddComponent<SummonNpcMarker>();
-
-        Character? character = clone.GetComponent<Character>();
-        VisEquipment? cloneVisuals = clone.GetComponent<VisEquipment>();
-        if (character == null || cloneVisuals?.m_bodyModel == null)
-        {
             Object.Destroy(clone);
             SummonNpcPlugin.LogSource.LogWarning(
-                "The friendly skeleton prefab is missing its Character or VisEquipment component; the Dead Raiser is unchanged.");
+                "The player body model has no animation bones; the Dead Raiser is unchanged.");
             return null;
         }
 
@@ -473,7 +674,6 @@ internal static class RegisterSummonNpcPatch
             cloneBones[i] = cloneBone;
         }
 
-        character.m_name = "NPC";
         SkinnedMeshRenderer targetBody = cloneVisuals.m_bodyModel;
         targetBody.sharedMesh = playerBodyMesh;
         targetBody.sharedMaterials = playerBodyMaterials;
@@ -482,38 +682,48 @@ internal static class RegisterSummonNpcPatch
         targetBody.localBounds = sourceBody.localBounds;
         targetBody.updateWhenOffscreen = true;
         targetBody.enabled = true;
-        if (playerVisuals.m_helmet != null)
+        Transform? playerHelmetMount = CreatePlayerHelmetMount(playerVisuals, cloneVisuals);
+        if (playerHelmetMount != null)
         {
-            Transform sourceHelmetMount = playerVisuals.m_helmet;
-            Transform? cloneHelmetParent = sourceHelmetMount.parent != null
-                ? FindMatchingBone(
-                    sourceBody.rootBone,
-                    cloneVisuals.m_bodyModel.rootBone,
-                    sourceHelmetMount.parent)
-                : null;
-            if (cloneHelmetParent != null)
-            {
-                GameObject helmetMountObject = new("SummonNPC_SummonHelmetMount");
-                Transform helmetMount = helmetMountObject.transform;
-                helmetMount.SetParent(cloneHelmetParent, false);
-                helmetMount.localPosition = sourceHelmetMount.localPosition;
-                helmetMount.localRotation = sourceHelmetMount.localRotation;
-                helmetMount.localScale = sourceHelmetMount.localScale;
-                cloneVisuals.m_helmet = helmetMount;
-                SummonNpcPlugin.LogSource.LogInfo(
-                    $"Created the summon helmet attachment from the player mount offset at '{cloneHelmetParent.name}'.");
-            }
-            else
-            {
-                SummonNpcPlugin.LogSource.LogWarning(
-                    "Could not map the player's helmet mount parent to the cloned skeleton rig; keeping the skeleton's helmet mount.");
-            }
+            cloneVisuals.m_helmet = playerHelmetMount;
         }
 
-        SummonNpcPlugin.LogSource.LogInfo(
-            $"Configured {SummonNpcPlugin.BodyType.Value} summon body mesh '{targetBody.sharedMesh.name}' with {cloneBones.Length} cloned bones and bounds {targetBody.localBounds}.");
+        if (SummonNpcPlugin.DebugLogging.Value)
+        {
+            SummonNpcPlugin.LogSource.LogInfo(
+                $"Configured {SummonNpcPlugin.BodyType.Value} summon body mesh '{targetBody.sharedMesh.name}' with {cloneBones.Length} cloned bones and bounds {targetBody.localBounds}.");
+        }
 
         return clone;
+    }
+
+    private static Transform? CreatePlayerHelmetMount(VisEquipment? playerVisuals, VisEquipment cloneVisuals)
+    {
+        Transform? sourceHelmetMount = playerVisuals?.m_helmet;
+        Transform? sourceRoot = playerVisuals?.m_bodyModel?.rootBone;
+        Transform? targetRoot = cloneVisuals.m_bodyModel?.rootBone;
+        Transform? cloneHelmetParent = sourceHelmetMount != null
+            ? FindMatchingBone(sourceRoot, targetRoot, sourceHelmetMount.parent)
+            : null;
+        if (cloneHelmetParent == null || sourceHelmetMount == null)
+        {
+            SummonNpcPlugin.LogSource.LogWarning(
+                "Could not map the player's helmet mount to the cloned skeleton rig; keeping the skeleton's helmet mount.");
+            return null;
+        }
+
+        GameObject helmetMountObject = new("SummonNPC_SummonHelmetMount");
+        Transform helmetMount = helmetMountObject.transform;
+        helmetMount.SetParent(cloneHelmetParent, false);
+        helmetMount.localPosition = sourceHelmetMount.localPosition;
+        helmetMount.localRotation = sourceHelmetMount.localRotation;
+        helmetMount.localScale = sourceHelmetMount.localScale;
+        if (SummonNpcPlugin.DebugLogging.Value)
+        {
+            SummonNpcPlugin.LogSource.LogInfo(
+                $"Created the summon helmet attachment from the player mount offset at '{cloneHelmetParent.name}'.");
+        }
+        return helmetMount;
     }
 
     private static Material[] GetBodyMaterials(
@@ -562,7 +772,7 @@ internal static class RegisterSummonNpcPatch
         return container.transform;
     }
 
-    private static Transform? FindMatchingBone(Transform? sourceRoot, Transform? targetRoot, Transform? sourceBone)
+    internal static Transform? FindMatchingBone(Transform? sourceRoot, Transform? targetRoot, Transform? sourceBone)
     {
         if (sourceRoot == null || targetRoot == null || sourceBone == null)
         {
@@ -630,6 +840,62 @@ internal static class RegisterSummonNpcPatch
 
 internal sealed class SummonNpcMarker : MonoBehaviour
 {
+    public Transform? PlayerHelmetMount;
+    public SkeletonChestOverlay? ChestOverlay;
+}
+
+[HarmonyPatch(typeof(VisEquipment), "SetRightHandEquipped")]
+internal static class SummonMeleeWeaponAppearancePatch
+{
+    private static void Prefix(VisEquipment __instance, ref int hash)
+    {
+        if (SummonAppearance.IsSummon(__instance.gameObject) &&
+            !string.Equals(SummonNpcPlugin.MeleeWeapon.Value, "Default", StringComparison.OrdinalIgnoreCase) &&
+            SummonAppearance.TryGetPrefabHash("skeleton_sword2", out int swordHash) &&
+            hash == swordHash &&
+            SummonAppearance.TryGetPrefabHash(SummonNpcPlugin.MeleeWeapon.Value, out int weaponHash))
+        {
+            hash = weaponHash;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(VisEquipment), "SetLeftHandEquipped")]
+internal static class SummonLeftHandAppearancePatch
+{
+    private static void Prefix(VisEquipment __instance, ref int hash, ref int variant)
+    {
+        if (!SummonAppearance.IsSummon(__instance.gameObject) || hash == 0)
+        {
+            return;
+        }
+
+        GameObject? original = ObjectDB.instance?.GetItemPrefab(hash);
+        if (original == null)
+        {
+            return;
+        }
+
+        ConfigEntry<string> setting;
+        if (string.Equals(original.name, "skeleton_bow2", StringComparison.Ordinal))
+        {
+            setting = SummonNpcPlugin.BowPrefab;
+        }
+        else if (!SummonNpcPlugin.ShieldAppearances.TryGetValue(original.name, out setting))
+        {
+            return;
+        }
+
+        if (string.Equals(setting.Value, "Default", StringComparison.OrdinalIgnoreCase) ||
+            !SummonAppearance.TryGetPrefabHash(setting.Value, out int replacementHash) ||
+            replacementHash == hash)
+        {
+            return;
+        }
+
+        hash = replacementHash;
+        variant = 0;
+    }
 }
 
 internal static class SummonAppearance
@@ -784,7 +1050,8 @@ internal static class SummonAppearance
         {
             if (HairEquippedMethod != null)
             {
-                if (HairEquippedMethod.Invoke(visuals, new object[] { hairHash }) is true)
+                if (HairEquippedMethod.Invoke(visuals, new object[] { hairHash }) is true &&
+                    SummonNpcPlugin.DebugLogging.Value)
                 {
                     SummonNpcPlugin.LogSource.LogInfo(
                         $"Applied hair prefab '{SummonNpcPlugin.HairPrefab.Value}'.");
@@ -802,7 +1069,8 @@ internal static class SummonAppearance
         {
             if (BeardEquippedMethod != null)
             {
-                if (BeardEquippedMethod.Invoke(visuals, new object[] { beardHash }) is true)
+                if (BeardEquippedMethod.Invoke(visuals, new object[] { beardHash }) is true &&
+                    SummonNpcPlugin.DebugLogging.Value)
                 {
                     SummonNpcPlugin.LogSource.LogInfo(
                         $"Applied beard prefab '{SummonNpcPlugin.BeardPrefab.Value}'.");
@@ -877,7 +1145,10 @@ internal static class SummonAppearance
         }
 
         PrefabHashes[prefabName] = hash;
-        SummonNpcPlugin.LogSource.LogInfo($"Using '{prefabName}' for summon appearance.");
+        if (SummonNpcPlugin.DebugLogging.Value)
+        {
+            SummonNpcPlugin.LogSource.LogInfo($"Using '{prefabName}' for summon appearance.");
+        }
         return true;
     }
 
@@ -992,17 +1263,378 @@ internal static class ApplySummonChestArmorPatch
             hash = armorHash;
         }
     }
+
+    private static void Postfix(VisEquipment __instance, int hash, bool __result)
+    {
+        if (__result && SummonNpcPlugin.UsesSkeletonBody &&
+            SummonAppearance.IsSummon(__instance.gameObject))
+        {
+            __instance.GetComponent<SummonNpcMarker>()?.ChestOverlay?.ApplyArmor(hash);
+        }
+    }
+}
+
+internal sealed class SkeletonChestOverlay : MonoBehaviour
+{
+    private static readonly HashSet<string> OverlayChestPrefabs = new(StringComparer.Ordinal)
+    {
+        "ArmorBronzeChest", "ArmorLeatherChest", "ArmorPaddedCuirass", "ArmorRagsChest",
+        "ArmorTrollLeatherChest", "ArmorDress1", "ArmorDress2", "ArmorDress3", "ArmorDress4",
+        "ArmorDress5", "ArmorDress6", "ArmorDress7", "ArmorDress8", "ArmorDress9", "ArmorDress10"
+    };
+    private static readonly int ChestTexture = Shader.PropertyToID("_ChestTex");
+    private static readonly int ChestBump = Shader.PropertyToID("_ChestBumpMap");
+    [SerializeField] private Shader? _shader;
+    private Material? _material;
+
+    internal static SkeletonChestOverlay? Create(VisEquipment? player, VisEquipment skeleton)
+    {
+        SkinnedMeshRenderer? playerBody = player?.m_bodyModel;
+        SkinnedMeshRenderer? skeletonBody = skeleton.m_bodyModel;
+        if (playerBody == null || skeletonBody == null || player?.m_models == null ||
+            player.m_models.Length == 0 || player.m_models[0].m_mesh == null)
+        {
+            SummonNpcPlugin.LogSource.LogWarning("Cannot create skeleton chest overlay: body data is unavailable.");
+            return null;
+        }
+
+        Mesh sourceMesh = player.m_models[0].m_mesh;
+        Transform[] sourceBones = playerBody.bones;
+        if (!sourceMesh.isReadable || sourceMesh.subMeshCount == 0 ||
+            sourceBones.Length != sourceMesh.bindposeCount)
+        {
+            SummonNpcPlugin.LogSource.LogWarning("Cannot create skeleton chest overlay: player mesh is incompatible.");
+            return null;
+        }
+
+        Transform[] bones = new Transform[sourceBones.Length];
+        bool[] spineBones = new bool[sourceBones.Length];
+        for (int i = 0; i < sourceBones.Length; i++)
+        {
+            Transform? bone = RegisterSummonNpcPatch.FindMatchingBone(
+                playerBody.rootBone, skeletonBody.rootBone, sourceBones[i]);
+            if (bone == null)
+            {
+                SummonNpcPlugin.LogSource.LogWarning(
+                    $"Cannot create skeleton chest overlay: player bone '{sourceBones[i]?.name}' is missing.");
+                return null;
+            }
+
+            bones[i] = bone;
+            spineBones[i] = sourceBones[i].name.IndexOf("spine", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        BoneWeight[] weights = sourceMesh.boneWeights;
+        int[] sourceTriangles = sourceMesh.GetTriangles(0);
+        List<int> triangles = new();
+        for (int i = 0; i + 2 < sourceTriangles.Length; i += 3)
+        {
+            int a = sourceTriangles[i];
+            int b = sourceTriangles[i + 1];
+            int c = sourceTriangles[i + 2];
+            if (IsTorsoVertex(a, weights, spineBones) ||
+                IsTorsoVertex(b, weights, spineBones) ||
+                IsTorsoVertex(c, weights, spineBones))
+            {
+                triangles.Add(a);
+                triangles.Add(b);
+                triangles.Add(c);
+            }
+        }
+
+        if (triangles.Count == 0)
+        {
+            SummonNpcPlugin.LogSource.LogWarning("Cannot create skeleton chest overlay: no torso triangles were found.");
+            return null;
+        }
+
+        Mesh mesh = Object.Instantiate(sourceMesh);
+        mesh.name = "SummonNPC_ChestOverlay";
+        mesh.subMeshCount = 1;
+        mesh.SetTriangles(triangles, 0);
+
+        GameObject overlayObject = new("SummonNPC_ChestOverlay");
+        Transform overlayTransform = overlayObject.transform;
+        overlayTransform.SetParent(skeletonBody.transform.parent, false);
+        overlayTransform.localPosition = skeletonBody.transform.localPosition;
+        overlayTransform.localRotation = skeletonBody.transform.localRotation;
+        overlayTransform.localScale = skeletonBody.transform.localScale;
+        SkinnedMeshRenderer renderer = overlayObject.AddComponent<SkinnedMeshRenderer>();
+        renderer.sharedMesh = mesh;
+        renderer.rootBone = skeletonBody.rootBone;
+        renderer.bones = bones;
+        renderer.localBounds = playerBody.localBounds;
+        renderer.updateWhenOffscreen = true;
+        renderer.enabled = false;
+        if (SummonNpcPlugin.DebugLogging.Value)
+        {
+            SummonNpcPlugin.LogSource.LogInfo(
+                $"Created skeleton chest overlay with {triangles.Count / 3} torso triangles.");
+        }
+        SkeletonChestOverlay overlay = overlayObject.AddComponent<SkeletonChestOverlay>();
+        overlay._shader = skeletonBody.sharedMaterial != null ? skeletonBody.sharedMaterial.shader : null;
+        return overlay;
+    }
+
+    private static bool IsTorsoVertex(int index, BoneWeight[] weights, bool[] spineBones)
+    {
+        if (index < 0 || index >= weights.Length)
+        {
+            return false;
+        }
+
+        BoneWeight weight = weights[index];
+        float spineWeight = BoneContribution(weight.boneIndex0, weight.weight0, spineBones) +
+            BoneContribution(weight.boneIndex1, weight.weight1, spineBones) +
+            BoneContribution(weight.boneIndex2, weight.weight2, spineBones) +
+            BoneContribution(weight.boneIndex3, weight.weight3, spineBones);
+        return spineWeight >= 0.25f;
+    }
+
+    private static float BoneContribution(int index, float weight, bool[] spineBones)
+    {
+        return index >= 0 && index < spineBones.Length && spineBones[index] ? weight : 0f;
+    }
+
+    internal void ApplyArmor(int hash)
+    {
+        SkinnedMeshRenderer renderer = GetComponent<SkinnedMeshRenderer>();
+        renderer.enabled = false;
+        if (hash == 0)
+        {
+            return;
+        }
+
+        GameObject? prefab = ObjectDB.instance?.GetItemPrefab(hash);
+        if (prefab == null)
+        {
+            SummonNpcPlugin.LogSource.LogWarning($"Cannot apply skeleton chest overlay: missing armor hash {hash}.");
+            return;
+        }
+
+        if (!OverlayChestPrefabs.Contains(prefab.name) &&
+            !prefab.name.StartsWith("ArmorTunic", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Material? armorMaterial = prefab.GetComponent<ItemDrop>()?.m_itemData?.m_shared?.m_armorMaterial;
+        Texture? texture = armorMaterial != null && armorMaterial.HasProperty(ChestTexture)
+            ? armorMaterial.GetTexture(ChestTexture)
+            : null;
+        if (texture == null)
+        {
+            SummonNpcPlugin.LogSource.LogWarning(
+                $"Cannot apply skeleton chest overlay: '{prefab.name}' has no chest texture.");
+            return;
+        }
+
+        if (SystemInfo.graphicsDeviceType == UnityEngine.Rendering.GraphicsDeviceType.Null)
+        {
+            return;
+        }
+
+        if (_material == null)
+        {
+            if (_shader == null || !_shader.isSupported)
+            {
+                SummonNpcPlugin.LogSource.LogWarning(
+                    "Cannot apply skeleton chest overlay: the skeleton shader is unavailable.");
+                return;
+            }
+
+            _material = new Material(_shader);
+            _material.SetFloat("_Cutoff", 0.3f);
+            renderer.sharedMaterial = _material;
+        }
+
+        _material.mainTexture = texture;
+        _material.SetTexture("_BumpMap",
+            armorMaterial != null && armorMaterial.HasProperty(ChestBump)
+                ? armorMaterial.GetTexture(ChestBump)
+                : null);
+        renderer.enabled = true;
+        if (SummonNpcPlugin.DebugLogging.Value)
+        {
+            SummonNpcPlugin.LogSource.LogInfo($"Applied skeleton chest overlay for '{prefab.name}'.");
+        }
+    }
+
+    private void OnDestroy()
+    {
+        if (_material != null)
+        {
+            Object.Destroy(_material);
+        }
+    }
 }
 
 [HarmonyPatch(typeof(VisEquipment), "SetHelmetEquipped")]
 internal static class ApplySummonHelmetPatch
 {
+    private static readonly Vector3 SkeletonHelmetOffset = new(0f, 0.1f, -0.06f);
+    private static readonly FieldInfo? HelmetItemInstanceField =
+        AccessTools.Field(typeof(VisEquipment), "m_helmetItemInstance");
+    private static readonly HashSet<string> LoggedHelmetFits = new();
+    private static bool _missingHelmetInstanceWarningLogged;
+
     private static void Prefix(VisEquipment __instance, ref int hash)
     {
         if (SummonAppearance.IsSummon(__instance.gameObject) &&
             SummonAppearance.TryGetConfiguredPrefabHash(SummonNpcPlugin.HelmetPrefab.Value, out int helmetHash))
         {
             hash = helmetHash;
+        }
+    }
+
+    private static void Postfix(VisEquipment __instance, bool __result)
+    {
+        if (!__result ||
+            !SummonAppearance.IsSummon(__instance.gameObject) ||
+            !SummonNpcPlugin.UsesSkeletonBody ||
+            !SummonAppearance.TryGetConfiguredPrefabHash(SummonNpcPlugin.HelmetPrefab.Value, out int helmetHash))
+        {
+            return;
+        }
+
+        GameObject? helmetPrefab = ObjectDB.instance?.GetItemPrefab(helmetHash);
+        if (helmetPrefab == null)
+        {
+            return;
+        }
+
+        if (HelmetItemInstanceField?.GetValue(__instance) is not GameObject helmetInstance)
+        {
+            if (!_missingHelmetInstanceWarningLogged)
+            {
+                SummonNpcPlugin.LogSource.LogWarning(
+                    "Could not access the equipped helmet instance; skeleton helmet fit was not adjusted.");
+                _missingHelmetInstanceWarningLogged = true;
+            }
+
+            return;
+        }
+
+        Transform helmetTransform = helmetInstance.transform;
+        SummonNpcMarker? marker = __instance.GetComponent<SummonNpcMarker>();
+        bool hasEquipOffset = helmetPrefab.transform.Find("equipoffset") != null;
+        Vector3 helmetOffset = SkeletonHelmetOffset;
+        if (helmetTransform.parent == __instance.m_helmet)
+        {
+            if (!hasEquipOffset)
+            {
+                helmetTransform.localRotation =
+                    Quaternion.Euler(0f, -90f, 0f) * helmetTransform.localRotation;
+
+                if (marker != null && marker.PlayerHelmetMount != null)
+                {
+                    Vector3 up = __instance.transform.up;
+                    float heightDifference = Vector3.Dot(
+                        marker.PlayerHelmetMount.position - helmetTransform.position, up);
+                    helmetTransform.position += up * heightDifference;
+                }
+
+                if (!string.Equals(helmetPrefab.name, "HelmetPadded", StringComparison.Ordinal))
+                {
+                    helmetOffset.z = 0f;
+                }
+            }
+
+            switch (helmetPrefab.name)
+            {
+                case "HelmetBerserkerHood":
+                case "HelmetBerserkerUndead":
+                    helmetOffset.z += 0.03f;
+                    break;
+                case "HelmetYule":
+                    helmetOffset.y += 0.03f;
+                    break;
+            }
+
+            helmetTransform.position += __instance.transform.TransformVector(helmetOffset);
+        }
+        else
+        {
+            Transform reference = marker != null && marker.PlayerHelmetMount != null
+                ? marker.PlayerHelmetMount.parent
+                : __instance.transform;
+            SkeletonHelmetBoneOffset offset = helmetInstance.AddComponent<SkeletonHelmetBoneOffset>();
+            offset.Initialize(reference, __instance.transform.TransformVector(helmetOffset));
+        }
+
+        if (SummonNpcPlugin.DebugLogging.Value && LoggedHelmetFits.Add(helmetPrefab.name))
+        {
+            SummonNpcPlugin.LogSource.LogInfo(
+                $"Skeleton helmet fit for '{helmetPrefab.name}': " +
+                $"attachment={(helmetTransform.parent == __instance.m_helmet ? "rigid" : "skinned")}, " +
+                $"equipoffset={hasEquipOffset}, adjustment={helmetOffset}.");
+        }
+    }
+}
+
+internal sealed class SkeletonHelmetBoneOffset : MonoBehaviour
+{
+    private readonly Dictionary<Transform, Transform> _boneProxies = new();
+    private Transform _reference = null!;
+    private Vector3 _localOffset;
+
+    internal void Initialize(Transform reference, Vector3 worldOffset)
+    {
+        _reference = reference;
+        _localOffset = reference.InverseTransformVector(worldOffset);
+
+        foreach (SkinnedMeshRenderer renderer in GetComponentsInChildren<SkinnedMeshRenderer>())
+        {
+            Transform[] bones = renderer.bones;
+            for (int i = 0; i < bones.Length; i++)
+            {
+                Transform bone = bones[i];
+                if (bone == null)
+                {
+                    continue;
+                }
+
+                if (!_boneProxies.TryGetValue(bone, out Transform proxy))
+                {
+                    proxy = new GameObject("SummonNPC_HelmetBoneOffset").transform;
+                    proxy.SetParent(bone, false);
+                    proxy.position = bone.position + worldOffset;
+                    _boneProxies.Add(bone, proxy);
+                }
+
+                bones[i] = proxy;
+            }
+
+            renderer.bones = bones;
+        }
+
+        if (_boneProxies.Count == 0)
+        {
+            SummonNpcPlugin.LogSource.LogWarning(
+                "Could not find skinned helmet bones; skeleton helmet fit was not adjusted.");
+        }
+    }
+
+    private void LateUpdate()
+    {
+        Vector3 worldOffset = _reference.TransformVector(_localOffset);
+        foreach (KeyValuePair<Transform, Transform> pair in _boneProxies)
+        {
+            if (pair.Key != null && pair.Value != null)
+            {
+                pair.Value.position = pair.Key.position + worldOffset;
+            }
+        }
+    }
+
+    private void OnDestroy()
+    {
+        foreach (Transform proxy in _boneProxies.Values)
+        {
+            if (proxy != null)
+            {
+                Object.Destroy(proxy.gameObject);
+            }
         }
     }
 }
@@ -1041,6 +1673,7 @@ internal static class ApplySummonHairPatch
     private static void Prefix(VisEquipment __instance, ref int hash)
     {
         if (SummonAppearance.IsSummon(__instance.gameObject) &&
+            !SummonNpcPlugin.UsesSkeletonBody &&
             SummonAppearance.TryGetConfiguredPrefabHash(SummonNpcPlugin.HairPrefab.Value, out int hairHash))
         {
             hash = SummonAppearance.GetHelmetAdjustedAccessoryHash(__instance, hairHash, beard: false);
@@ -1054,6 +1687,7 @@ internal static class ApplySummonBeardPatch
     private static void Prefix(VisEquipment __instance, ref int hash)
     {
         if (SummonAppearance.IsSummon(__instance.gameObject) &&
+            !SummonNpcPlugin.UsesSkeletonBody &&
             SummonAppearance.TryGetConfiguredPrefabHash(SummonNpcPlugin.BeardPrefab.Value, out int beardHash))
         {
             hash = SummonAppearance.GetHelmetAdjustedAccessoryHash(__instance, beardHash, beard: true);
@@ -1121,7 +1755,8 @@ internal static class ApplySummonSkinColorPatch
 
     private static void Prefix(VisEquipment __instance)
     {
-        if (SummonAppearance.IsSummon(__instance.gameObject))
+        if (SummonAppearance.IsSummon(__instance.gameObject) &&
+            !SummonNpcPlugin.UsesSkeletonBody)
         {
             SummonAppearance.PrepareConfiguredHairAndBeard(__instance);
         }
@@ -1129,7 +1764,8 @@ internal static class ApplySummonSkinColorPatch
 
     private static void Postfix(VisEquipment __instance)
     {
-        if (!SummonAppearance.IsSummon(__instance.gameObject))
+        if (!SummonAppearance.IsSummon(__instance.gameObject) ||
+            SummonNpcPlugin.UsesSkeletonBody)
         {
             return;
         }
@@ -1164,7 +1800,8 @@ internal static class SuppressSummonHairPatch
 {
     private static bool Prefix(VisEquipment __instance)
     {
-        if (!SummonAppearance.IsSummon(__instance.gameObject))
+        if (!SummonAppearance.IsSummon(__instance.gameObject) ||
+            SummonNpcPlugin.UsesSkeletonBody)
         {
             return true;
         }
@@ -1185,7 +1822,8 @@ internal static class SuppressSummonBeardPatch
 {
     private static bool Prefix(VisEquipment __instance)
     {
-        if (!SummonAppearance.IsSummon(__instance.gameObject))
+        if (!SummonAppearance.IsSummon(__instance.gameObject) ||
+            SummonNpcPlugin.UsesSkeletonBody)
         {
             return true;
         }
